@@ -1,0 +1,78 @@
+name: Build ESP32 Firmware
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ESP-IDF Binaries
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.1
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Fix Git Permissions
+        run: git config --global --add safe.directory '*'
+
+      - name: Unpack Zip and Build
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+
+          # 1. Unzip the project archive
+          python3 -c "
+          import zipfile, glob
+          zips = glob.glob('*.zip') + glob.glob('**/*.zip', recursive=True)
+          for z in zips:
+              print('Unpacking:', z)
+              with zipfile.ZipFile(z, 'r') as zip_ref:
+                  zip_ref.extractall('extracted_project')
+          "
+
+          # 2. Automatically fix the Bluetooth function on line 776
+          python3 -c "
+          import glob
+          for path in glob.glob('**/*.cpp', recursive=True) + glob.glob('**/*.c', recursive=True):
+              with open(path, 'r', errors='ignore') as f:
+                  content = f.read()
+              if 'esp_hf_ag_register_audio_data_callback' in content:
+                  print('Patching line 776 in:', path)
+                  content = content.replace('esp_hf_ag_register_audio_data_callback(hfp_audio_in_cb)', 'esp_hf_ag_register_data_callback(hfp_audio_in_cb, NULL)')
+                  content = content.replace('esp_hf_ag_register_audio_data_callback', 'esp_hf_ag_register_data_callback')
+                  with open(path, 'w') as f:
+                      f.write(content)
+          "
+
+          # 3. Locate project directory
+          PROJECT_DIR=""
+          for f in $(find . -name "CMakeLists.txt"); do
+            dir=$(dirname "$f")
+            if [ -d "$dir/main" ] && [ -f "$dir/main/CMakeLists.txt" ]; then
+              PROJECT_DIR="$dir"
+              break
+            fi
+          done
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Project directory not found."
+            exit 1
+          fi
+
+          echo "Found project at: $PROJECT_DIR"
+          cd "$PROJECT_DIR"
+
+          idf.py set-target esp32
+          idf.py build
+
+      - name: Upload Binary Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32cam-binaries
+          path: |
+            **/build/bootloader/bootloader.bin
+            **/build/partition_table/partition-table.bin
+            **/build/*.bin
